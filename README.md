@@ -4,55 +4,79 @@
 
 [![Deploy to Cloudflare Workers](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/lemodragon/cloudflare-proxy)
 
-这是一个定制化的 Cloudflare Workers 代理脚本，在原版基础上增加了**域名白名单控制**和**自动引流/跳转**功能。
-
-## ✨ 新增特性
-
-- 🛡️ **白名单控制** - 支持通过环境变量配置允许访问的域名，未授权域名将被拒绝访问。
-- 📢 **自动引流** - Web 界面访问 10 秒后自动跳转至指定演示站（支持后台运行不影响代理使用）。
-- 🖼️ **自定义 UI** - 集成了自定义 Logo 图标，点击标题或 Logo 可直接跳转。
-
-## 🚀 核心特性
-
-- 🌐 **多种访问方式** - Web 界面、查询参数、路径方式、标准 HTTP 代理
-- 🔒 **HTTPS 支持** - 完整支持 HTTPS 网站代理
-- 🔄 **智能重定向** - 自动处理 301/302 等重定向
-- 🛠️ **路径修复** - 自动修复 HTML 中的相对路径
-- 🌍 **CORS 支持** - 完整的跨域资源共享支持
-- 📱 **响应式设计** - 完美适配移动端和桌面端
-- ⚡ **零成本运行** - Cloudflare Workers 免费版每天 10 万次请求
+这是一个定制化的 Cloudflare Workers 代理脚本，在原版基础上增加了 **Docker Hub 镜像代理**、**访问令牌控制**、**域名白名单**和**自动引流/跳转**功能。
 
 ## 页面展示
 
 ![screenshot](./screenshot.png)
 
-> **注意**：Web 界面包含自定义 Logo，且页面加载 10 秒后会自动跳转至演示站点。
+> Web 界面会根据环境变量配置动态显示状态徽章（Docker/代理 锁定状态、白名单启用状态）。
 
-## ⚙️ 配置说明 (重要)
+## 核心特性
 
-本版本依赖环境变量来控制白名单功能。部署后请务必进行以下配置：
+- **Docker Hub 镜像代理** - 完整支持 Docker Registry V2 API，可直接替换镜像前缀或配置为全局镜像源
+- **访问令牌 (ACCESS_TOKEN)** - 支持 Bearer、Basic (docker login)、查询参数、路径嵌入四种认证方式
+- **白名单控制 (WHITELIST)** - 通过环境变量配置允许访问的域名，未授权域名将被拒绝
+- **多种代理方式** - Web 界面、查询参数、路径方式、HTTP 标准代理
+- **HTTPS 支持** - 完整支持 HTTPS 网站代理
+- **智能重定向** - 自动处理 301/302 等重定向
+- **路径修复** - 自动修复 HTML 中的相对路径
+- **CORS 支持** - 完整的跨域资源共享支持
+- **响应式 UI** - 完美适配移动端和桌面端，含动态状态指示灯
+- **自动引流** - Web 界面访问 15 秒后自动跳转至指定演示站
+- **零成本运行** - Cloudflare Workers 免费版每天 10 万次请求
 
-### 1. 设置白名单 (WHITELIST)
+## 环境变量配置
 
-如果不设置此变量，代理将默认**允许访问所有网站**。如果设置了此变量，只有列表中的域名（及其子域名）允许被代理。
+部署后通过 Cloudflare Dashboard 或 `wrangler secret` 配置以下环境变量：
 
-1.  登录 Cloudflare Dashboard。
-2.  进入你的 Worker 项目 -> **Settings** -> **Variables and Secrets**。
-3.  点击 **Add** 添加变量：
-    -   **Variable name**: `WHITELIST`
-    -   **Value**: 你的允许域名列表，用逗号分隔。
-    -   *示例*: `github.com, raw.githubusercontent.com, google.com`
-4.  点击 **Deploy** 保存。
+### ACCESS_TOKEN（访问令牌）
 
-### 2. 引流与跳转配置
+控制谁能使用代理服务。**不设置则完全开放。**
 
-代码中硬编码了引流逻辑：
-- **跳转目标**: `https://demo.lvdpub.com`
-- **Logo 图片**: `https://demo-cloudflare-imgbed.pages.dev/file/f8fd26c6eff4c2e26b824.png`
-- **跳转时间**: 10 秒
-- *如需修改这些设置，请直接编辑 `worker.js` 代码中的 `getRootHtml` 函数部分。*
+- **作用范围**：同时控制 Docker 代理和通用 HTTP 代理
+- **支持多令牌**：用逗号分隔，如 `token1,token2,token3`
+- **设置方式**（推荐使用 Secret，部署后不会被清空）：
 
-## 📦 安装方式
+```bash
+# 方式一：Wrangler CLI（推荐，加密存储）
+wrangler secret put ACCESS_TOKEN
+# 输入令牌值，如：my-secret-token
+
+# 方式二：Cloudflare Dashboard
+# Worker → Settings → Variables and Secrets → Add → Type: Secret
+```
+
+设置后的认证方式：
+
+| 场景 | 认证方式 | 示例 |
+|------|----------|------|
+| Docker 拉取镜像 | `docker login` 密码 | `docker login your-proxy.com -u any -p YOUR_TOKEN` |
+| 浏览器/API | Bearer 请求头 | `Authorization: Bearer YOUR_TOKEN` |
+| 浏览器/API | 查询参数 | `?token=YOUR_TOKEN` |
+| Emby 等无法加头的客户端 | 路径首段嵌入 | `/YOUR_TOKEN/target.com/path` |
+| Web 界面 | 令牌输入框 | 页面表单中填写 |
+
+### WHITELIST（域名白名单）
+
+限制代理可访问的目标域名。**不设置则允许所有域名。**
+
+- **子域名匹配**：添加 `google.com` 会自动匹配 `api.google.com`
+- **Docker 代理**：需添加 `registry-1.docker.io` 才能使用 Docker 功能
+
+```bash
+# 方式一：Wrangler CLI
+wrangler secret put WHITELIST
+# 输入值：github.com, raw.githubusercontent.com, registry-1.docker.io
+
+# 方式二：wrangler.toml（明文，适合非敏感配置）
+# [vars]
+# WHITELIST = "github.com, registry-1.docker.io"
+
+# 方式三：Dashboard → Variables and Secrets
+```
+
+## 安装方式
 
 ### 方式一：一键部署（推荐）
 
@@ -67,13 +91,16 @@ npm install -g wrangler
 # 2. 登录 Cloudflare
 wrangler login
 
-# 3. 克隆仓库 (请使用修改后的代码覆盖 worker.js)
-git clone [https://github.com/lemodragon/cloudflare-proxy.git](https://github.com/lemodragon/cloudflare-proxy.git)
+# 3. 克隆仓库
+git clone https://github.com/lemodragon/cloudflare-proxy.git
 cd cloudflare-proxy
 
 # 4. 部署
 wrangler deploy
 
+# 5. 配置环境变量（可选）
+wrangler secret put ACCESS_TOKEN
+wrangler secret put WHITELIST
 ```
 
 ### 方式三：使用 Cloudflare Dashboard
@@ -81,135 +108,180 @@ wrangler deploy
 1. 登录 [Cloudflare Dashboard](https://dash.cloudflare.com/)
 2. 进入 **Workers & Pages**
 3. 点击 **Create Application** > **Create Worker**
-4. 将定制后的 `worker.js` 代码完整复制粘贴到编辑器
+4. 将 `worker.js` 代码完整复制粘贴到编辑器
 5. 点击 **Save and Deploy**
-6. **别忘了配置环境变量 `WHITELIST`**
+6. 在 **Settings → Variables and Secrets** 中配置环境变量
 
-## 📖 使用方式
+## 使用方式
 
-### 方式 1: Web 界面 (含引流功能)
+### Docker 镜像代理
 
-直接访问你的 Worker URL，在网页界面输入目标网址：
-
-```
-https://$YOUR-PROXY-DOMAIN/
-
-```
-
-> **提示**：在该页面停留 10 秒会自动跳转到演示站。建议输入网址后点击“开始代理”，代理页面会在**新标签页**打开，不受原标签页跳转影响。
-
-### 方式 2: 查询参数
-
-在 URL 后添加 `?url=` 参数：
+**用法一：直接替换镜像前缀**
 
 ```bash
-https://$YOUR-PROXY-DOMAIN/?url=[https://example.com](https://example.com)
+# 登录（设置了 ACCESS_TOKEN 时必须）
+docker login your-proxy.com -u any -p YOUR_TOKEN
 
+# 拉取镜像（镜像名前加代理域名）
+docker pull your-proxy.com/library/nginx:latest
+docker pull your-proxy.com/jc21/nginx-proxy-manager:latest
 ```
 
-### 方式 3: 路径方式
+**用法二：配置为全局 Docker 镜像源**
 
-直接在路径中指定目标网址：
+```json
+// /etc/docker/daemon.json
+{
+  "registry-mirrors": ["https://your-proxy.com"]
+}
+```
+
+```bash
+# 重启 Docker 生效
+sudo systemctl restart docker
+
+# 之后正常拉取即可自动走代理
+docker pull nginx:latest
+```
+
+> Docker 代理仅需白名单添加 `registry-1.docker.io`，认证流程内部自动处理。
+
+### 通用 HTTP/HTTPS 代理
+
+**方式 1: Web 界面**
+
+直接访问 Worker URL，在网页界面输入目标网址。如设置了 ACCESS_TOKEN，在令牌输入框中填写。
+
+```
+https://your-proxy.com/
+```
+
+**方式 2: 查询参数**
+
+```bash
+https://your-proxy.com/?url=https://example.com
+
+# 带令牌
+https://your-proxy.com/?url=https://example.com&token=YOUR_TOKEN
+```
+
+**方式 3: 路径方式**
 
 ```bash
 # 完整 URL（带协议）
-https://$YOUR-PROXY-DOMAIN/[https://example.com](https://example.com)
+https://your-proxy.com/https://example.com
 
 # 简写（自动添加 https://）
-https://$YOUR-PROXY-DOMAIN/example.com
+https://your-proxy.com/example.com
 
+# 路径嵌入令牌（适合 Emby 等客户端）
+https://your-proxy.com/YOUR_TOKEN/target.com:443/path
 ```
 
-### 方式 4: HTTP 代理
-
-设置为系统代理，适用于命令行工具：
+**方式 4: HTTP 代理**
 
 ```bash
 # Linux/macOS
-export HTTP_PROXY=https://$YOUR-PROXY-DOMAIN
-export HTTPS_PROXY=https://$YOUR-PROXY-DOMAIN
+export HTTP_PROXY=https://your-proxy.com
+export HTTPS_PROXY=https://your-proxy.com
 
 # Windows (PowerShell)
-$env:HTTP_PROXY="https://$YOUR-PROXY-DOMAIN"
-$env:HTTPS_PROXY="https://$YOUR-PROXY-DOMAIN"
+$env:HTTP_PROXY="https://your-proxy.com"
+$env:HTTPS_PROXY="https://your-proxy.com"
 
 # 使用代理访问
-curl [https://api.github.com](https://api.github.com)
-
+curl https://api.github.com
 ```
 
-## 💡 使用场景
+## 使用场景
 
-### 1. GitHub 文件加速
+### GitHub 文件加速
 
-加速 raw.https://www.google.com/search?q=githubusercontent.com 文件下载（**需将 https://www.google.com/search?q=githubusercontent.com 加入白名单**）：
+加速 raw.githubusercontent.com 文件下载（需将 `raw.githubusercontent.com` 加入白名单）：
 
 ```bash
-# 使用代理（加速访问）
-https://$YOUR-PROXY-DOMAIN/[https://raw.githubusercontent.com/user/repo/main/file.txt](https://raw.githubusercontent.com/user/repo/main/file.txt)
-
+https://your-proxy.com/https://raw.githubusercontent.com/user/repo/main/file.txt
 ```
 
-### 2. Docker 镜像加速
+### Docker 镜像加速
 
-配置 Docker 镜像代理源（**需将 docker.io 加入白名单**）：
+见上方 Docker 镜像代理章节。需将 `registry-1.docker.io` 加入白名单。
 
-```bash
-# 在 /etc/docker/daemon.json 中配置
-{
-  "registry-mirrors": [
-    "https://$YOUR-PROXY-DOMAIN/[https://registry-1.docker.io](https://registry-1.docker.io)"
-  ]
-}
+### OpenAI API 代理
 
-```
-
-### 3. OpenAI API 代理
-
-代理 OpenAI API 请求（**需将 openai.com 加入白名单**）：
+代理 OpenAI API 请求（需将 `openai.com` 加入白名单）：
 
 ```javascript
 const openai = new OpenAI({
-  baseURL: "https://$YOUR-PROXY-DOMAIN/[https://api.openai.com/v1](https://api.openai.com/v1)",
+  baseURL: "https://your-proxy.com/https://api.openai.com/v1",
   apiKey: "your-api-key",
 });
-
 ```
 
-### 4. 前端 CORS 代理
+### 前端 CORS 代理
 
 解决前端跨域问题：
 
 ```javascript
-// 使用代理解决 CORS
-fetch("https://$YOUR-PROXY-DOMAIN/[https://api.example.com/data](https://api.example.com/data)")
+fetch("https://your-proxy.com/https://api.example.com/data")
   .then((res) => res.json())
   .then((data) => console.log(data));
-
 ```
 
-## ⚠️ 注意与提醒
+### Emby 媒体服务器
 
-### 🚨 重要提示
+对于无法自定义请求头的客户端，使用路径嵌入令牌：
 
-1. **白名单机制**
-* 开启白名单后，访问未授权的域名会返回 `403 Access Denied` 错误。
-* 请确保将所有依赖的子域名（如 CDN 域名）也加入白名单，或直接添加主域名（如 `google.com` 会自动匹配 `api.google.com`）。
+```
+https://your-proxy.com/YOUR_TOKEN/target.com:443/emby/path
+```
 
+## 注意事项
 
-2. **引流跳转**
-* Web 界面的自动跳转仅在访问根路径 `/` 时触发。
-* 直接通过 API 或路径代理访问资源（如 `/https://google.com`）**不会**触发跳转，不影响业务逻辑。
+### 环境变量持久化
 
+- 通过 GitHub 触发 Cloudflare 自动部署时，**Dashboard 中手动添加的明文变量（Variables）可能被覆盖**
+- **推荐使用 `wrangler secret put` 或 Dashboard 中的 Secret 类型**，Secret 加密存储，部署后不会被清空
+- 非敏感配置（如 WHITELIST）也可写入 `wrangler.toml` 的 `[vars]` 段
 
-3. **使用自定义域名**
-* Cloudflare 默认的 `*.workers.dev` 域名在某些地区可能无法访问，建议绑定自定义域名。
+### 白名单机制
 
+- 开启白名单后，访问未授权的域名会返回 `403 Access Denied`
+- 请将所有依赖的子域名也加入白名单，或直接添加主域名（如 `google.com` 自动匹配 `api.google.com`）
+- Docker 代理需要 `registry-1.docker.io` 在白名单中
 
+### 引流跳转
 
-### 🔒 安全配置
+- Web 界面的自动跳转仅在访问根路径 `/` 时触发
+- 通过 API 或路径代理访问资源不会触发跳转，不影响业务逻辑
+- 跳转目标和时间等可直接编辑 `worker.js` 中的 `getRootHtml` 函数
 
-虽然本项目提供了白名单功能，但建议根据需要进一步增强安全性，例如添加 API Key 验证（需自行修改代码）。
+### 其他
+
+- Cloudflare 默认的 `*.workers.dev` 域名在某些地区可能无法访问，建议绑定自定义域名
+- 不支持 WebSocket 连接
+
+## 常见问题
+
+### Q: 为什么提示 "Domain is not in the whitelist"?
+
+A: 你配置了环境变量 `WHITELIST`，但当前访问的域名不在列表中。请去 Cloudflare 后台添加该域名。
+
+### Q: docker login 提示 401 怎么办?
+
+A: 确认你设置了 `ACCESS_TOKEN` 环境变量，并且 `docker login` 时的密码与令牌匹配。用户名可以是任意值。
+
+```bash
+docker login your-proxy.com -u any -p YOUR_ACCESS_TOKEN
+```
+
+### Q: 部署后环境变量消失了?
+
+A: 使用 `wrangler secret put` 或 Dashboard 的 **Secret** 类型设置变量，而非明文 Variable。Secret 不会被部署覆盖。
+
+### Q: 15秒跳转会打断代理访问吗?
+
+A: 不会。Web 界面的代理请求使用 `window.open` 在新标签页打开。原标签页的跳转不会影响已打开的代理页面。
 
 ## 免责声明
 
@@ -220,24 +292,10 @@ fetch("https://$YOUR-PROXY-DOMAIN/[https://api.example.com/data](https://api.exa
 3. **责任自负** - 使用本代理产生的任何后果由使用者自行承担
 4. **商业用途** - 如需商业使用，请确保符合相关法律法规
 
-## 常见问题
-
-### Q: 为什么提示 "Domain is not in the whitelist"?
-
-A: 你配置了环境变量 `WHITELIST`，但当前访问的域名不在列表中。请去 Cloudflare 后台添加该域名。
-
-### Q: 10秒跳转会打断我的代理访问吗？
-
-A: 不会。Web 界面的代理请求是使用 `window.open` 在**新标签页**打开的。原标签页的跳转不会关闭或影响新打开的代理页面。
-
-### Q: 可以代理 WebSocket 吗？
-
-A: 不可以。Cloudflare Workers 目前不支持 WebSocket 连接。
-
 ## 许可证
 
-[GPL-3 License](https://www.google.com/search?q=LICENSE)
+[GPL-3 License](LICENSE)
 
 ---
 
-**如果这个项目对你有帮助，请在 [GitHub](https://github.com/lemodragon/cloudflare-proxy) 上给我们一个 ⭐️**
+**如果这个项目对你有帮助，请在 [GitHub](https://github.com/lemodragon/cloudflare-proxy) 上给我们一个 Star**

@@ -17,3 +17,9 @@ workers_dev = true
 # [[routes]]
 # pattern = "proxy.example.com/*"
 # zone_name = "example.com"
+
+# 日志观测配置
+[observability]
+[observability.logs]
+enabled = true
+invocation_logs = true

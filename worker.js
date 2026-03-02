@@ -4,11 +4,17 @@
  * * 功能列表：
  * 1. 核心功能：支持 Web UI、URL参数、路径、HTTP标准协议多种代理方式。
  * 2. 白名单机制：通过环境变量 WHITELIST 控制允许访问的域名（如果不设置则允许所有）。
- * 3. 自动引流：访问 Web UI 首页 15秒后自动跳转到指定演示站。
- * 4. 点击引流：点击页面 Logo 或标题直接跳转到指定演示站。
- * 5. 智能重写：自动修复目标网页中的相对路径资源。
- * 6. UI 定制：使用了自定义的 Logo 和 Favicon。
+ * 3. 访问令牌：通过环境变量 ACCESS_TOKEN 控制谁能使用代理（Docker 用 docker login，通用代理用 ?token= 或 Bearer 头）。
+ * 4. Docker Hub 镜像代理：支持 Docker Registry V2 API，可直接替换镜像前缀或配置为全局镜像源。
+ * 4. 自动引流：访问 Web UI 首页 15秒后自动跳转到指定演示站。
+ * 5. 点击引流：点击页面 Logo 或标题直接跳转到指定演示站。
+ * 6. 智能重写：自动修复目标网页中的相对路径资源。
+ * 7. UI 定制：使用了自定义的 Logo 和 Favicon。
  */
+
+// Docker Hub 代理配置
+const DOCKER_HUB_REGISTRY = 'https://registry-1.docker.io';
+const DOCKER_HUB_AUTH = 'https://auth.docker.io';
 
 export default {
   // 注入 env 参数以获取环境变量
@@ -29,7 +35,7 @@ export default {
 
     // 根路径 - 返回 Web UI 界面
     if (url.pathname === '/' || url.pathname === '') {
-      return new Response(getRootHtml(), {
+      return new Response(getRootHtml(env), {
         headers: {
           'Content-Type': 'text/html; charset=utf-8',
           ...corsHeaders()
@@ -40,6 +46,11 @@ export default {
     // 修复 favicon.ico 被错误代理导致的 502 错误
     if (url.pathname === '/favicon.ico') {
       return Response.redirect('https://demo-cloudflare-imgbed.pages.dev/file/f8fd26c6eff4c2e26b824.png', 301);
+    }
+
+    // Docker Registry V2 API 代理（支持直接替换镜像前缀和 registry-mirrors 两种用法）
+    if (url.pathname === '/v2' || url.pathname === '/v2/' || url.pathname.startsWith('/v2/')) {
+      return handleDockerRequest(request, url, env);
     }
 
     // 代理请求处理，传入 env 以支持白名单功能
@@ -90,6 +101,65 @@ function isWhitelisted(targetUrlStr, whitelistEnv) {
 }
 
 /**
+ * 验证访问令牌（ACCESS_TOKEN）
+ * 支持四种传递方式：
+ * 1. Authorization: Bearer xxx 请求头
+ * 2. Authorization: Basic（docker login 密码即令牌）
+ * 3. ?token=xxx 查询参数
+ * 4. 路径首段嵌入令牌：/令牌/目标域名（适合 Emby 等无法自定义请求头的客户端）
+ * 未设置 ACCESS_TOKEN 时全部放行（开放模式）
+ */
+function checkAccessToken(request, url, env) {
+  if (!env.ACCESS_TOKEN || env.ACCESS_TOKEN.trim() === '') {
+    return { allowed: true };
+  }
+
+  const validTokens = env.ACCESS_TOKEN.split(',').map(t => t.trim()).filter(t => t.length > 0);
+  if (validTokens.length === 0) {
+    return { allowed: true };
+  }
+
+  const authHeader = request.headers.get('Authorization');
+
+  // Bearer 令牌（通用代理）
+  if (authHeader?.startsWith('Bearer ')) {
+    if (validTokens.includes(authHeader.substring(7).trim())) {
+      return { allowed: true };
+    }
+  }
+
+  // Basic 认证（Docker login，密码即令牌）
+  if (authHeader?.startsWith('Basic ')) {
+    try {
+      const decoded = atob(authHeader.substring(6));
+      const password = decoded.includes(':') ? decoded.split(':').slice(1).join(':') : decoded;
+      if (validTokens.includes(password)) {
+        return { allowed: true };
+      }
+    } catch (e) {
+      // Base64 解码失败，忽略
+    }
+  }
+
+  // 查询参数 ?token=xxx
+  const tokenParam = url.searchParams.get('token');
+  if (tokenParam && validTokens.includes(tokenParam)) {
+    return { allowed: true };
+  }
+
+  // 路径首段令牌：/MY_TOKEN/target.com:443/path
+  const firstSegment = url.pathname.split('/')[1];
+  if (firstSegment) {
+    const decoded = decodeURIComponent(firstSegment);
+    if (validTokens.includes(decoded)) {
+      return { allowed: true, pathToken: true };
+    }
+  }
+
+  return { allowed: false };
+}
+
+/**
  * 处理 CONNECT 方法 (HTTPS 隧道)
  */
 function handleConnect(request) {
@@ -110,6 +180,32 @@ function handleConnect(request) {
  * 处理代理请求的核心逻辑
  */
 async function handleProxyRequest(request, url, env) {
+  // ACCESS_TOKEN 访问控制
+  const accessCheck = checkAccessToken(request, url, env);
+  if (!accessCheck.allowed) {
+    return new Response(
+      JSON.stringify({
+        error: 'Access Denied',
+        message: '需要提供有效的访问令牌 (ACCESS_TOKEN)'
+      }, null, 2),
+      {
+        status: 401,
+        headers: {
+          'Content-Type': 'application/json',
+          ...corsHeaders()
+        }
+      }
+    );
+  }
+  // 令牌嵌入路径时，剥离首段令牌再继续解析目标 URL
+  if (accessCheck.pathToken) {
+    const parts = url.pathname.split('/');
+    parts.splice(1, 1);
+    url = new URL((parts.join('/') || '/') + url.search, url.origin);
+  }
+  // 移除 token 参数，避免转发到目标
+  url.searchParams.delete('token');
+
   try {
     // 方式 1: 查询参数 ?url=https://example.com
     let targetUrl = url.searchParams.get('url');
@@ -273,6 +369,145 @@ async function handleProxyRequest(request, url, env) {
 }
 
 /**
+ * 处理 Docker Registry V2 API 请求
+ * 将 /v2/ 开头的请求转发到 Docker Hub (registry-1.docker.io)
+ *
+ * 支持两种使用方式：
+ * 1. 直接替换镜像前缀：image: your-proxy.com/library/nginx:latest
+ * 2. 配置为全局镜像源：{"registry-mirrors": ["https://your-proxy.com"]}
+ *
+ * 认证流程：
+ * - Docker Hub 返回 401 时，改写 WWW-Authenticate 头中的 realm 地址
+ * - 将认证请求通过 /v2/auth 端点代理到 auth.docker.io
+ */
+async function handleDockerRequest(request, url, env) {
+  // 白名单检查：验证 registry-1.docker.io 是否被允许
+  const whitelistCheck = isWhitelisted(DOCKER_HUB_REGISTRY, env.WHITELIST);
+  if (!whitelistCheck.allowed) {
+    return new Response(
+      JSON.stringify({
+        errors: [{
+          code: 'DENIED',
+          message: 'Docker Hub (registry-1.docker.io) 不在白名单中，请将 registry-1.docker.io 添加到 WHITELIST 环境变量'
+        }]
+      }, null, 2),
+      {
+        status: 403,
+        headers: { 'Content-Type': 'application/json' }
+      }
+    );
+  }
+
+  try {
+    // 认证代理端点：/v2/auth → auth.docker.io/token
+    if (url.pathname === '/v2/auth' || url.pathname === '/v2/auth/') {
+      return await proxyDockerAuth(request, url, env);
+    }
+
+    // 将请求转发到 Docker Hub Registry
+    const targetUrl = DOCKER_HUB_REGISTRY + url.pathname + url.search;
+    const proxyHeaders = cleanHeaders(request.headers);
+
+    const response = await fetch(targetUrl, {
+      method: request.method,
+      headers: proxyHeaders,
+      body: ['GET', 'HEAD'].includes(request.method) ? null : request.body,
+      redirect: 'follow'
+    });
+
+    // 改写 WWW-Authenticate 头，将认证地址指向本代理
+    const newHeaders = new Headers(response.headers);
+    const wwwAuth = newHeaders.get('WWW-Authenticate');
+    if (wwwAuth) {
+      newHeaders.set('WWW-Authenticate', wwwAuth.replace(
+        /realm="https?:\/\/auth\.docker\.io[^"]*"/i,
+        `realm="https://${url.host}/v2/auth"`
+      ));
+    }
+
+    return new Response(response.body, {
+      status: response.status,
+      headers: newHeaders
+    });
+
+  } catch (error) {
+    return new Response(
+      JSON.stringify({
+        errors: [{
+          code: 'PROXY_ERROR',
+          message: error.message
+        }]
+      }, null, 2),
+      {
+        status: 502,
+        headers: { 'Content-Type': 'application/json' }
+      }
+    );
+  }
+}
+
+/**
+ * 代理 Docker Hub 认证请求
+ * 将 /v2/auth?service=...&scope=... 转发到 auth.docker.io/token?service=...&scope=...
+ * 当设置了 ACCESS_TOKEN 时，通过 Basic auth 验证访问权限（docker login 的密码即令牌）
+ */
+async function proxyDockerAuth(request, url, env) {
+  // ACCESS_TOKEN 访问控制：从 Basic auth 中提取密码进行验证
+  if (env.ACCESS_TOKEN && env.ACCESS_TOKEN.trim() !== '') {
+    const validTokens = env.ACCESS_TOKEN.split(',').map(t => t.trim()).filter(t => t.length > 0);
+
+    if (validTokens.length > 0) {
+      let authenticated = false;
+      const authHeader = request.headers.get('Authorization');
+
+      if (authHeader?.startsWith('Basic ')) {
+        try {
+          const decoded = atob(authHeader.substring(6));
+          const password = decoded.includes(':') ? decoded.split(':').slice(1).join(':') : decoded;
+          authenticated = validTokens.includes(password);
+        } catch (e) {
+          // Base64 解码失败
+        }
+      }
+
+      if (!authenticated) {
+        return new Response(
+          JSON.stringify({
+            errors: [{ code: 'UNAUTHORIZED', message: '需要 docker login 并提供有效的访问令牌' }]
+          }, null, 2),
+          {
+            status: 401,
+            headers: {
+              'Content-Type': 'application/json',
+              'WWW-Authenticate': 'Basic realm="Docker Proxy"'
+            }
+          }
+        );
+      }
+    }
+  }
+
+  const authUrl = new URL(DOCKER_HUB_AUTH + '/token');
+  url.searchParams.forEach((value, key) => {
+    authUrl.searchParams.set(key, value);
+  });
+
+  // 剥离代理认证头，避免将代理令牌转发给 Docker Hub 认证服务
+  const headers = cleanHeaders(request.headers);
+  headers.delete('Authorization');
+
+  const response = await fetch(authUrl.toString(), {
+    method: request.method,
+    headers
+  });
+
+  return new Response(response.body, {
+    status: response.status,
+    headers: response.headers
+  });
+}
+
+/**
  * 处理 HTML 内容中的相对路径
  * 将 href="/style.css" 替换为 绝对路径代理地址
  */
@@ -337,10 +572,33 @@ function noCacheHeaders() {
  * 返回 Web UI 的 HTML 字符串
  * 包含了修改后的 Logo、Favicon、点击跳转和 10s 自动跳转逻辑
  */
-function getRootHtml() {
+function getRootHtml(env) {
   // 定义常量：Logo 地址和跳转目标地址
   const LOGO_URL = 'https://demo-cloudflare-imgbed.pages.dev/file/f8fd26c6eff4c2e26b824.png';
   const JUMP_URL = 'https://demo.lvdpub.com';
+
+  // 环境变量状态检测
+  const hasToken = !!(env && env.ACCESS_TOKEN && env.ACCESS_TOKEN.trim());
+  const hasWhitelist = !!(env && env.WHITELIST && env.WHITELIST.trim());
+
+  // SVG 图标
+  const lockedSvg = '<svg class="w-3.5 h-3.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H6.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25z"/></svg>';
+  const unlockedSvg = '<svg class="w-3.5 h-3.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M13.5 10.5V6.75a4.5 4.5 0 1 1 9 0v3.75M3.75 21.75h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H3.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25z"/></svg>';
+  const shieldSvg = '<svg class="w-3.5 h-3.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75m-3-7.036A11.959 11.959 0 0 1 3.598 6 11.99 11.99 0 0 0 3 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285z"/></svg>';
+  const globeSvg = '<svg class="w-3.5 h-3.5 flex-shrink-0" fill="none" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" d="M12 21a9.004 9.004 0 0 0 8.716-6.747M12 21a9.004 9.004 0 0 1-8.716-6.747M12 21c2.485 0 4.5-4.03 4.5-9S14.485 3 12 3m0 18c-2.485 0-4.5-4.03-4.5-9S9.515 3 12 3m0 0a8.997 8.997 0 0 1 7.843 4.582M12 3a8.997 8.997 0 0 0-7.843 4.582"/></svg>';
+
+  // 徽章样式
+  const amberBadge = 'inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium bg-amber-50 text-amber-700 ring-1 ring-inset ring-amber-600/20 dark:bg-amber-400/10 dark:text-amber-400 dark:ring-amber-400/20';
+  const tealBadge = 'inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium bg-teal-50 text-teal-700 ring-1 ring-inset ring-teal-600/20 dark:bg-teal-400/10 dark:text-teal-400 dark:ring-teal-400/20';
+  const grayBadge = 'inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium bg-zinc-100 text-zinc-500 ring-1 ring-inset ring-zinc-500/10 dark:bg-zinc-400/10 dark:text-zinc-400 dark:ring-zinc-400/20';
+
+  // 生成状态徽章
+  const tokenBadge = hasToken
+    ? `<span class="${amberBadge}">${lockedSvg}Docker 需登录</span><span class="${amberBadge}">${lockedSvg}代理 需令牌</span>`
+    : `<span class="${tealBadge}">${unlockedSvg}Docker 开放</span><span class="${tealBadge}">${unlockedSvg}代理 开放</span>`;
+  const whitelistBadge = hasWhitelist
+    ? `<span class="${amberBadge}">${shieldSvg}白名单已启用</span>`
+    : `<span class="${grayBadge}">${globeSvg}无域名限制</span>`;
 
   return `<!DOCTYPE html>
 <html lang="zh-CN" class="h-full">
@@ -420,16 +678,24 @@ function getRootHtml() {
               <div class="mx-auto max-w-2xl lg:max-w-5xl">
 
                 <div class="max-w-2xl">
-                  <a href="${JUMP_URL}" class="group block cursor-pointer transition-opacity hover:opacity-80" title="点击跳转到演示站">
-                    <img 
-                      src="${LOGO_URL}" 
-                      alt="Proxy Logo" 
-                      class="h-20 w-auto mb-6 rounded-lg shadow-sm"
+                  <a href="${JUMP_URL}" class="group block cursor-pointer transition-opacity hover:opacity-80 mb-6" title="点击跳转到演示站">
+                    <img
+                      src="${LOGO_URL}"
+                      alt="Proxy Logo"
+                      class="h-20 w-auto rounded-lg shadow-sm"
                     >
-                    <h1 class="text-4xl font-bold tracking-tight text-zinc-800 sm:text-5xl dark:text-zinc-100 group-hover:text-teal-500 transition-colors">
-                      Cloudflare Proxy
-                    </h1>
                   </a>
+                  <div class="flex items-center gap-3 flex-wrap">
+                    <a href="${JUMP_URL}" class="group cursor-pointer transition-opacity hover:opacity-80" title="点击跳转到演示站">
+                      <h1 class="text-4xl font-bold tracking-tight text-zinc-800 sm:text-5xl dark:text-zinc-100 group-hover:text-teal-500 transition-colors">
+                        Cloudflare Proxy
+                      </h1>
+                    </a>
+                    <div class="flex gap-2 flex-wrap">
+                      ${tokenBadge}
+                      ${whitelistBadge}
+                    </div>
+                  </div>
                   <p class="mt-6 text-base text-zinc-600 dark:text-zinc-400">
                     基于 Cloudflare Workers 的全功能 HTTP/HTTPS 代理服务，支持多种访问方式，完全免费且易于使用。
                   </p>
@@ -446,6 +712,17 @@ function getRootHtml() {
                         id="targetUrl"
                         placeholder="example.com 或 https://example.com"
                         required
+                        class="w-full rounded-md bg-white px-4 py-2 text-sm text-zinc-900 shadow-sm ring-1 ring-inset ring-zinc-300 placeholder:text-zinc-400 focus:ring-2 focus:ring-teal-500 dark:bg-zinc-800 dark:text-zinc-100 dark:ring-zinc-700 dark:placeholder:text-zinc-500"
+                      >
+                    </div>
+                    <div>
+                      <label for="accessToken" class="block text-sm font-medium text-zinc-900 dark:text-zinc-100 mb-2">
+                        访问令牌（如已设置 ACCESS_TOKEN）
+                      </label>
+                      <input
+                        type="password"
+                        id="accessToken"
+                        placeholder="留空表示无需令牌"
                         class="w-full rounded-md bg-white px-4 py-2 text-sm text-zinc-900 shadow-sm ring-1 ring-inset ring-zinc-300 placeholder:text-zinc-400 focus:ring-2 focus:ring-teal-500 dark:bg-zinc-800 dark:text-zinc-100 dark:ring-zinc-700 dark:placeholder:text-zinc-500"
                       >
                     </div>
@@ -497,7 +774,7 @@ function getRootHtml() {
                     <div class="rounded-lg bg-zinc-50 p-4 dark:bg-zinc-800/50">
                       <div class="font-medium text-zinc-900 dark:text-zinc-100 mb-2">🐳 Docker 镜像加速</div>
                       <p class="text-sm text-zinc-600 dark:text-zinc-400 mb-2">
-                        配置 Docker 镜像代理源
+                        支持直接替换镜像前缀或配置为 Docker 全局镜像源
                       </p>
                       <code class="text-xs text-teal-600 dark:text-teal-400 break-all" id="scene2"></code>
                     </div>
@@ -607,7 +884,7 @@ function getRootHtml() {
 
     // 填充使用场景示例
     document.getElementById('scene1').textContent = currentOrigin + '/https://raw.githubusercontent.com/user/repo/main/file.txt';
-    document.getElementById('scene2').textContent = currentOrigin + '/https://registry-1.docker.io';
+    document.getElementById('scene2').textContent = '{"registry-mirrors": ["' + currentOrigin + '"]}';
     document.getElementById('scene3').textContent = currentOrigin + '/https://api.openai.com/v1/chat/completions';
     document.getElementById('scene4').textContent = 'fetch("' + currentOrigin + '/https://api.example.com/data")';
 
@@ -616,14 +893,18 @@ function getRootHtml() {
       event.preventDefault();
 
       let targetUrl = document.getElementById('targetUrl').value.trim();
+      const token = document.getElementById('accessToken').value.trim();
 
       // 如果没有协议，自动添加 https://
       if (!targetUrl.startsWith('http://') && !targetUrl.startsWith('https://')) {
         targetUrl = 'https://' + targetUrl;
       }
 
-      // 构建代理 URL
-      const proxyUrl = currentOrigin + '/' + encodeURIComponent(targetUrl);
+      // 构建代理 URL，携带令牌
+      let proxyUrl = currentOrigin + '/' + encodeURIComponent(targetUrl);
+      if (token) {
+        proxyUrl += '?token=' + encodeURIComponent(token);
+      }
 
       // 在新标签页打开 (不会中断当前页面的跳转倒计时)
       window.open(proxyUrl, '_blank');
