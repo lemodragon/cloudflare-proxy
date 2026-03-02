@@ -412,11 +412,30 @@ async function handleDockerRequest(request, url, env) {
       method: request.method,
       headers: proxyHeaders,
       body: ['GET', 'HEAD'].includes(request.method) ? null : request.body,
-      redirect: 'follow'
+      redirect: 'manual'
     });
 
+    // 手动处理重定向，避免自动跟随导致 Blob 拉取异常
+    let finalResponse = response;
+    if ([301, 302, 303, 307, 308].includes(response.status)) {
+      const location = response.headers.get('Location');
+      if (location) {
+        const redirectUrl = new URL(location, targetUrl).toString();
+        const redirectHeaders = new Headers(proxyHeaders);
+        // Blob CDN 通常不需要 Registry 的 Authorization，保守移除
+        redirectHeaders.delete('Authorization');
+
+        finalResponse = await fetch(redirectUrl, {
+          method: request.method,
+          headers: redirectHeaders,
+          body: ['GET', 'HEAD'].includes(request.method) ? null : request.body,
+          redirect: 'manual'
+        });
+      }
+    }
+
     // 改写 WWW-Authenticate 头，将认证地址指向本代理
-    const newHeaders = new Headers(response.headers);
+    const newHeaders = new Headers(finalResponse.headers);
     const wwwAuth = newHeaders.get('WWW-Authenticate');
     if (wwwAuth) {
       newHeaders.set('WWW-Authenticate', wwwAuth.replace(
@@ -425,8 +444,8 @@ async function handleDockerRequest(request, url, env) {
       ));
     }
 
-    return new Response(response.body, {
-      status: response.status,
+    return new Response(finalResponse.body, {
+      status: finalResponse.status,
       headers: newHeaders
     });
 
@@ -528,7 +547,7 @@ async function handleHtmlContent(response, protocol, host, targetUrl) {
 function cleanHeaders(headers) {
   const cleaned = new Headers(headers);
 
-  // 移除 Cloudflare 和代理相关头，增加隐蔽性
+  // 移除 Cloudflare、连接控制和代理相关头
   const removeHeaders = [
     'cf-connecting-ip',
     'cf-ipcountry',
@@ -537,7 +556,14 @@ function cleanHeaders(headers) {
     'cf-worker',
     'x-forwarded-for',
     'x-forwarded-proto',
-    'x-real-ip'
+    'x-real-ip',
+    'host',
+    'connection',
+    'content-length',
+    'transfer-encoding',
+    'keep-alive',
+    'proxy-connection',
+    'upgrade'
   ];
 
   removeHeaders.forEach(header => cleaned.delete(header));
