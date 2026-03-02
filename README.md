@@ -279,6 +279,25 @@ docker login your-proxy.com -u any -p YOUR_ACCESS_TOKEN
 
 A: 使用 `wrangler secret put` 或 Dashboard 的 **Secret** 类型设置变量，而非明文 Variable。Secret 不会被部署覆盖。
 
+### Q: 配置了 registry-mirrors 但 docker pull 超时?
+
+A: **`registry-mirrors` 模式与 `ACCESS_TOKEN` 不兼容。** Docker 客户端在 registry-mirrors（全局镜像源）模式下不会发送 `docker login` 的凭据，导致代理认证失败，Docker 回退直连 Docker Hub 超时。
+
+两种解决方式：
+
+| 方式 | 操作 | ACCESS_TOKEN |
+|------|------|-------------|
+| **镜像前缀**（推荐） | 镜像名加 `your-proxy.com/` 前缀 | 生效，`docker login` 凭据会发送 |
+| **registry-mirrors** | daemon.json 配置全局镜像源 | **不生效**，需关闭 Docker 令牌验证 |
+
+如果需要令牌控制，请使用镜像前缀方式：
+
+```yaml
+# docker-compose.yml
+image: your-proxy.com/jc21/nginx-proxy-manager:latest
+image: your-proxy.com/library/nginx:latest
+```
+
 ### Q: 15秒跳转会打断代理访问吗?
 
 A: 不会。Web 界面的代理请求使用 `window.open` 在新标签页打开。原标签页的跳转不会影响已打开的代理页面。
